@@ -1,0 +1,96 @@
+From 987b65231a3d1081073c08f80df2eedb3d037546 Mon Sep 17 00:00:00 2001
+From: hetianyi <hetianyi@bytedance.com>
+Date: Mon, 14 Mar 2016 22:35:50 +0800
+Subject: [PATCH] Properly handle RemoteException
+
+---
+ .../apache/hadoop/ipc/ProxyRpcServerException.java | 32 +++++++++++++++++
+ .../main/java/org/apache/hadoop/ipc/Server.java    | 28 ++++++++++-----
+ create mode 100644 hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/ProxyRpcServerException.java
+
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/ProxyRpcServerException.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/ProxyRpcServerException.java
+new file mode 100644
+index 0000000..812afa8
+--- /dev/null
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/ProxyRpcServerException.java
+@@ -0,0 +1,32 @@
++package org.apache.hadoop.ipc;
++
++import org.apache.hadoop.classification.InterfaceStability;
++import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos;
++
++@InterfaceStability.Evolving
++public class ProxyRpcServerException extends RuntimeException {
++
++  final RpcHeaderProtos.RpcResponseHeaderProto.RpcStatusProto status;
++  final RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto code;
++  final String errorClass;
++  final String errorMessage;
++
++  public ProxyRpcServerException(RpcHeaderProtos.RpcResponseHeaderProto.RpcStatusProto status,
++                                 RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto code,
++                                 String errorClass, String errorMessage) {
++    this.status = status;
++    this.code = code;
++    this.errorClass = errorClass;
++    this.errorMessage = errorMessage;
++  }
++
++  @Override
++  public String toString() {
++    return "ProxyRpcServerException [" +
++      "status=" + status +
++      ", code=" + code +
++      ", errorClass=" + errorClass +
++      ", errorMessage=" + errorMessage +
++      ']';
++  }
++}
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
+index 43e8ed4..ce64ddf 100644
+--- a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
+@@ -2087,20 +2087,32 @@ public Writable run() throws Exception {
+             } else {
+               LOG.info(logMsg, e);
+             }
+-            if (e instanceof RpcServerException) {
+-              RpcServerException rse = ((RpcServerException)e); 
++            errorClass = null;
++            error = null;
++            if (e instanceof ProxyRpcServerException) {
++              ProxyRpcServerException proxyException = (ProxyRpcServerException)e;
++              returnStatus = proxyException.status;
++              detailedErr = proxyException.code;
++              errorClass = proxyException.errorClass;
++              error = proxyException.errorMessage;
++            } else if (e instanceof RpcServerException) {
++              RpcServerException rse = ((RpcServerException)e);
+               returnStatus = rse.getRpcStatusProto();
+               detailedErr = rse.getRpcErrorCodeProto();
+             } else {
+               returnStatus = RpcStatusProto.ERROR;
+               detailedErr = RpcErrorCodeProto.ERROR_APPLICATION;
+             }
+-            errorClass = e.getClass().getName();
+-            error = StringUtils.stringifyException(e);
+-            // Remove redundant error class name from the beginning of the stack trace
+-            String exceptionHdr = errorClass + ": ";
+-            if (error.startsWith(exceptionHdr)) {
+-              error = error.substring(exceptionHdr.length());
++            if (errorClass == null) {
++              errorClass = e.getClass().getName();
++            }
++            if (error == null) {
++              error = StringUtils.stringifyException(e);
++              // Remove redundant error class name from the beginning of the stack trace
++              String exceptionHdr = errorClass + ": ";
++              if (error.startsWith(exceptionHdr)) {
++                error = error.substring(exceptionHdr.length());
++              }
+             }
+           }
+           CurCall.set(null);
+-- 
+1.9.3 (Apple Git-50)
+
