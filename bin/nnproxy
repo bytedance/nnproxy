@@ -1,0 +1,43 @@
+#!/bin/bash
+NNPROXY_HOME=`dirname $0`
+
+DEFAULT_LIBEXEC_DIR=$HADOOP_HOME/libexec
+HADOOP_LIBEXEC_DIR=${HADOOP_LIBEXEC_DIR:-$DEFAULT_LIBEXEC_DIR}
+. $HADOOP_LIBEXEC_DIR/hdfs-config.sh
+
+function print_usage(){
+  echo "Usage: nnproxy COMMAND"
+  echo "       where COMMAND is one of:"
+  echo "  proxy                run proxy server"
+  echo "  dump                 dump mount table (to stdout)"
+  echo "  load                 load mount table (from stdin)"
+  echo ""
+  echo "Most commands print help when invoked w/o parameters."
+  # There are also debug commands, but they don't show up in this listing.
+}
+
+if [ $# = 0 ]; then
+  print_usage
+  exit
+fi
+
+COMMAND=$1
+shift
+
+case $COMMAND in
+  # usage flags
+  --help|-help|-h)
+    print_usage
+    exit
+    ;;
+esac
+
+if [ "$COMMAND" = "proxy" ] ; then
+  CLASS='com.bytedance.hadoop.hdfs.server.ProxyMain'
+elif [ "$COMMAND" = "dump" ] ; then
+  CLASS='com.bytedance.hadoop.hdfs.tools.DumpMount'
+elif [ "$COMMAND" = "load" ] ; then
+  CLASS='com.bytedance.hadoop.hdfs.tools.LoadMount'
+fi
+
+exec $HADOOP_HOME/bin/hadoop jar $NNPROXY_HOME/../lib/hadoop-nnproxy*.jar $CLASS "$@"

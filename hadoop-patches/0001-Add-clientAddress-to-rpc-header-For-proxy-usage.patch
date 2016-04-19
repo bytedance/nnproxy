@@ -1,0 +1,195 @@
+From 57936bf50d7a8b289a958fcc4bf6b2522203b644 Mon Sep 17 00:00:00 2001
+From: hetianyi <hetianyi@bytedance.com>
+Date: Thu, 10 Mar 2016 18:36:06 +0800
+Subject: [PATCH] Add clientAddress to rpc header (For proxy usage)
+
+---
+ .../main/java/org/apache/hadoop/ipc/Client.java    | 12 ++++++---
+ .../main/java/org/apache/hadoop/ipc/Server.java    | 29 +++++++++++++++++++---
+ .../org/apache/hadoop/security/SaslRpcClient.java  |  2 +-
+ .../java/org/apache/hadoop/util/ProtoUtil.java     |  5 +++-
+ .../hadoop-common/src/main/proto/RpcHeader.proto   |  1 +
+ .../java/org/apache/hadoop/util/TestProtoUtil.java |  2 +-
+ 6 files changed, 41 insertions(+), 10 deletions(-)
+
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Client.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Client.java
+index d9385fb..51bb2f2 100644
+--- a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Client.java
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Client.java
+@@ -110,7 +110,7 @@
+ 
+   private static final ThreadLocal<Integer> callId = new ThreadLocal<Integer>();
+   private static final ThreadLocal<Integer> retryCount = new ThreadLocal<Integer>();
+-
++  private static final ThreadLocal<String> clientAddress = new ThreadLocal<String>();
+   /** Set call id and retry count for the next call. */
+   public static void setCallIdAndRetryCount(int cid, int rc) {
+     Preconditions.checkArgument(cid != RpcConstants.INVALID_CALL_ID);
+@@ -121,6 +121,10 @@ public static void setCallIdAndRetryCount(int cid, int rc) {
+     retryCount.set(rc);
+   }
+ 
++  public static void setClientAddress(String s) {
++    clientAddress.set(s);
++  }
++
+   private Hashtable<ConnectionId, Connection> connections =
+     new Hashtable<ConnectionId, Connection>();
+ 
+@@ -418,7 +422,7 @@ public Connection(ConnectionId remoteId, int serviceClass) throws IOException {
+         RpcRequestHeaderProto pingHeader = ProtoUtil
+             .makeRpcRequestHeader(RpcKind.RPC_PROTOCOL_BUFFER,
+                 OperationProto.RPC_FINAL_PACKET, PING_CALL_ID,
+-                RpcConstants.INVALID_RETRY_COUNT, clientId);
++                RpcConstants.INVALID_RETRY_COUNT, clientId, clientAddress.get());
+         pingHeader.writeDelimitedTo(pingRequest);
+       }
+       this.pingInterval = remoteId.getPingInterval();
+@@ -896,7 +900,7 @@ private void writeConnectionContext(ConnectionId remoteId,
+       RpcRequestHeaderProto connectionContextHeader = ProtoUtil
+           .makeRpcRequestHeader(RpcKind.RPC_PROTOCOL_BUFFER,
+               OperationProto.RPC_FINAL_PACKET, CONNECTION_CONTEXT_CALL_ID,
+-              RpcConstants.INVALID_RETRY_COUNT, clientId);
++              RpcConstants.INVALID_RETRY_COUNT, clientId, clientAddress.get());
+       RpcRequestMessageWrapper request =
+           new RpcRequestMessageWrapper(connectionContextHeader, message);
+       
+@@ -1006,7 +1010,7 @@ public void sendRpcRequest(final Call call)
+       final DataOutputBuffer d = new DataOutputBuffer();
+       RpcRequestHeaderProto header = ProtoUtil.makeRpcRequestHeader(
+           call.rpcKind, OperationProto.RPC_FINAL_PACKET, call.id, call.retry,
+-          clientId);
++          clientId, clientAddress.get());
+       header.writeDelimitedTo(d);
+       call.rpcRequest.write(d);
+ 
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
+index 16cb232..43e8ed4 100644
+--- a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/ipc/Server.java
+@@ -315,7 +315,13 @@ public static int getCallRetryCount() {
+    */
+   public static InetAddress getRemoteIp() {
+     Call call = CurCall.get();
+-    return (call != null && call.connection != null) ? call.connection
++    if (call == null) {
++      return null;
++    }
++    if (call.clientAddress != null) {
++      return call.clientAddress;
++    }
++    return (call.connection != null) ? call.connection
+         .getHostInetAddress() : null;
+   }
+   
+@@ -510,6 +516,8 @@ public synchronized void refreshCallQueue(Configuration conf) {
+     private final byte[] clientId;
+     private final Span traceSpan; // the tracing span on the server side
+ 
++    private final InetAddress clientAddress;
++
+     public Call(int id, int retryCount, Writable param, 
+         Connection connection) {
+       this(id, retryCount, param, connection, RPC.RpcKind.RPC_BUILTIN,
+@@ -522,7 +530,12 @@ public Call(int id, int retryCount, Writable param, Connection connection,
+     }
+ 
+     public Call(int id, int retryCount, Writable param, Connection connection,
+-        RPC.RpcKind kind, byte[] clientId, Span span) {
++                RPC.RpcKind kind, byte[] clientId, Span span) {
++      this(id, retryCount, param, connection, kind, clientId, span, null);
++    }
++
++    public Call(int id, int retryCount, Writable param, Connection connection,
++        RPC.RpcKind kind, byte[] clientId, Span span, InetAddress clientAddress) {
+       this.callId = id;
+       this.retryCount = retryCount;
+       this.rpcRequest = param;
+@@ -532,6 +545,7 @@ public Call(int id, int retryCount, Writable param, Connection connection,
+       this.rpcKind = kind;
+       this.clientId = clientId;
+       this.traceSpan = span;
++      this.clientAddress = clientAddress;
+     }
+     
+     @Override
+@@ -1861,9 +1875,18 @@ private void processRpcRequest(RpcRequestHeaderProto header,
+         traceSpan = Trace.startSpan(rpcRequest.toString(), parentSpan).detach();
+       }
+ 
++      InetAddress clientAddress = null;
++      if (header.hasClientAddress()) {
++        try {
++          clientAddress = InetAddress.getByName(header.getClientAddress());
++        } catch (UnknownHostException e) {
++          LOG.warn("Invalid client address:" + header.getClientAddress());
++          clientAddress = null;
++        }
++      }
+       Call call = new Call(header.getCallId(), header.getRetryCount(),
+           rpcRequest, this, ProtoUtil.convert(header.getRpcKind()),
+-          header.getClientId().toByteArray(), traceSpan);
++          header.getClientId().toByteArray(), traceSpan, clientAddress);
+ 
+       callQueue.put(call);              // queue the call; maybe blocked here
+       incRpcCount();  // Increment the rpc count
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/SaslRpcClient.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/SaslRpcClient.java
+index dfb0898..0becc44 100644
+--- a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/SaslRpcClient.java
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/SaslRpcClient.java
+@@ -95,7 +95,7 @@
+   private static final RpcRequestHeaderProto saslHeader = ProtoUtil
+       .makeRpcRequestHeader(RpcKind.RPC_PROTOCOL_BUFFER,
+           OperationProto.RPC_FINAL_PACKET, AuthProtocol.SASL.callId,
+-          RpcConstants.INVALID_RETRY_COUNT, RpcConstants.DUMMY_CLIENT_ID);
++          RpcConstants.INVALID_RETRY_COUNT, RpcConstants.DUMMY_CLIENT_ID, null);
+   private static final RpcSaslProto negotiateRequest =
+       RpcSaslProto.newBuilder().setState(SaslState.NEGOTIATE).build();
+   
+diff --git a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/util/ProtoUtil.java b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/util/ProtoUtil.java
+index 36b5ff1..d40c2c9 100644
+--- a/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/util/ProtoUtil.java
++++ b/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/util/ProtoUtil.java
+@@ -163,10 +163,13 @@ static RpcKindProto convert(RPC.RpcKind kind) {
+  
+   public static RpcRequestHeaderProto makeRpcRequestHeader(RPC.RpcKind rpcKind,
+       RpcRequestHeaderProto.OperationProto operation, int callId,
+-      int retryCount, byte[] uuid) {
++      int retryCount, byte[] uuid, String clientAddress) {
+     RpcRequestHeaderProto.Builder result = RpcRequestHeaderProto.newBuilder();
+     result.setRpcKind(convert(rpcKind)).setRpcOp(operation).setCallId(callId)
+         .setRetryCount(retryCount).setClientId(ByteString.copyFrom(uuid));
++    if (clientAddress != null) {
++      result.setClientAddress(clientAddress);
++    }
+ 
+     // Add tracing info if we are currently tracing.
+     if (Trace.isTracing()) {
+diff --git a/hadoop-common-project/hadoop-common/src/main/proto/RpcHeader.proto b/hadoop-common-project/hadoop-common/src/main/proto/RpcHeader.proto
+index c879150..a95f06b 100644
+--- a/hadoop-common-project/hadoop-common/src/main/proto/RpcHeader.proto
++++ b/hadoop-common-project/hadoop-common/src/main/proto/RpcHeader.proto
+@@ -80,6 +80,7 @@ message RpcRequestHeaderProto { // the header for the RpcRequest
+   // retry count, 1 means this is the first retry
+   optional sint32 retryCount = 5 [default = -1];
+   optional RPCTraceInfoProto traceInfo = 6; // tracing info
++  optional string clientAddress = 7; // real client address, for proxy usage
+ }
+ 
+ 
+diff --git a/hadoop-common-project/hadoop-common/src/test/java/org/apache/hadoop/util/TestProtoUtil.java b/hadoop-common-project/hadoop-common/src/test/java/org/apache/hadoop/util/TestProtoUtil.java
+index ab891b8..fd4a379 100644
+--- a/hadoop-common-project/hadoop-common/src/test/java/org/apache/hadoop/util/TestProtoUtil.java
++++ b/hadoop-common-project/hadoop-common/src/test/java/org/apache/hadoop/util/TestProtoUtil.java
+@@ -82,7 +82,7 @@ public void testRpcClientId() {
+     byte[] uuid = ClientId.getClientId();
+     RpcRequestHeaderProto header = ProtoUtil.makeRpcRequestHeader(
+         RpcKind.RPC_PROTOCOL_BUFFER, OperationProto.RPC_FINAL_PACKET, 0,
+-        RpcConstants.INVALID_RETRY_COUNT, uuid);
++        RpcConstants.INVALID_RETRY_COUNT, uuid, null);
+     assertTrue(Arrays.equals(uuid, header.getClientId().toByteArray()));
+   }
+ }
+-- 
+1.9.3 (Apple Git-50)
+
